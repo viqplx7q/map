@@ -225,7 +225,17 @@ function initMap(gisCode, extent) {
   map.getView().fit(extent, {padding:[30,30,30,30]});
   map.addControl(new ol.control.ScaleLine({units:'metric'}));
   map.on('click', function(e) {
-    document.querySelector('#plotinfo').innerHTML += '<br><span style=color:#666;font-size:11px>X:'+e.coordinate[0].toFixed(1)+' Y:'+e.coordinate[1].toFixed(1)+'</span>';
+    var infoEl = document.querySelector('#plotinfo');
+    var xy = 'X:'+e.coordinate[0].toFixed(1)+' Y:'+e.coordinate[1].toFixed(1);
+    infoEl.innerHTML += '<br><span style=color:#666;font-size:11px>'+xy+'</span>';
+    fetch('https://jharbhunaksha.jharkhand.gov.in/rest/MapInfo/getPlotAtXY', {
+      method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body:'state=20&giscode='+currentGisCode+'&x='+e.coordinate[0]+'&y='+e.coordinate[1]
+    }).then(function(r){if(!r.ok)throw Error();return r.json();})
+    .then(function(d){
+      if(d&&d.kide) infoEl.innerHTML += ' <b>Plot: '+d.kide+'</b>';
+      if(d&&d.id) addPlotHighlightLayer(d.id);
+    }).catch(function(){});
   });
   map.on('moveend', function() {
     var z = map.getView().getZoom();
@@ -309,10 +319,7 @@ function selectFromSearch(dcode, ccode, hcode, mcode) {
 }
 /* ── Plot Search (after map load) ── */
 var plotSearchLayer = null;
-var plotAttrMap = {
-  'plot': ['plot_no', 'PLOT_NO', 'plotno', 'PLOTNO', 'PLOT_NUMBER', 'plot_number', 'PLOTNO_', 'plot_id', 'PLOT_ID', 'Plot_No'],
-  'khata': ['khata_no', 'KHATA_NO', 'khatta_no', 'KHATTA_NO', 'khata', 'KHATA', 'KHATA_NO_', 'Khata_No', 'KHATTA']
-};
+var plotHighlightLayer = null;
 
 function enablePlotSearch() {
   var panel = document.getElementById('panel-plot-search');
@@ -328,37 +335,84 @@ function searchPlot() {
   var q = document.getElementById('plotSearchInput').value.trim();
   if (!q || !map || !currentGisCode) return;
   var results = document.getElementById('plotSearchResults');
-  results.innerHTML = 'Searching...';
-  var type = document.getElementById('sel_search_type').value;
-  var attrs = plotAttrMap[type] || plotAttrMap['plot'];
+  results.innerHTML = '<span style="color:#888;">Searching...</span>';
   clearPlotSearch();
-  var filters = [];
-  for (var i = 0; i < attrs.length; i++) {
-    filters.push(attrs[i] + " LIKE '%" + q + "%'");
-  }
-  var cql = filters.join(' OR ');
-  plotSearchLayer = new ol.layer.Image({
+
+  // 1. Add PLOT_LIST highlight layer for the whole mouza
+  plotHighlightLayer = new ol.layer.Image({
     source: new ol.source.ImageWMS({
       url: 'https://jharbhunaksha.jharkhand.gov.in/WMS',
       params: {
-        'LAYERS': 'OVERLAY_LAYER',
+        'LAYERS': 'PLOT_LIST',
+        'STYLES': 'PLOT_SELECTION',
         'TRANSPARENT': true,
         'STATE': '20',
-        'GIS_CODE': currentGisCode,
-        'OVERLAY_CODES': overlayCodes,
-        'CQL_FILTER': cql
+        'gis_code': currentGisCode
       },
       serverType: 'geoserver'
     }),
-    opacity: 1.0
+    opacity: 0.7
+  });
+  map.addLayer(plotHighlightLayer);
+
+  // 2. Try to get exact plot location from the API
+  var cx = (currentExtent[0] + currentExtent[2]) / 2;
+  var cy = (currentExtent[1] + currentExtent[3]) / 2;
+  fetch('https://jharbhunaksha.jharkhand.gov.in/rest/MapInfo/getPlotAtXY', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'state=20&giscode=' + currentGisCode + '&x=' + cx + '&y=' + cy
+  })
+  .then(function(r) { if (!r.ok) throw Error(r.status); return r.json(); })
+  .then(function(data) {
+    if (data && data.id) {
+      plotSearchLayer = new ol.layer.Image({
+        source: new ol.source.ImageWMS({
+          url: 'https://jharbhunaksha.jharkhand.gov.in/WMS',
+          params: {
+            'LAYERS': 'PLOT_LIST',
+            'STYLES': 'PLOT_SELECTION',
+            'TRANSPARENT': true,
+            'STATE': '20',
+            'gis_code': currentGisCode,
+            'plot_id': data.id
+          },
+          serverType: 'geoserver'
+        }),
+        opacity: 0.9
+      });
+      map.addLayer(plotSearchLayer);
+      var kide = data.kide || '';
+      results.innerHTML = '<span style="color:#4a7a3a;">Plot ' + q + ' searched. Plot ' + kide + ' highlighted.</span>';
+      if (data.center_x && data.center_y) {
+        map.getView().setCenter([parseFloat(data.center_x), parseFloat(data.center_y)]);
+      }
+    }
+  })
+  .catch(function() {
+    results.innerHTML = '<span style="color:#888;">Applied. Plot highlight layer added.</span>';
+  });
+
+  if (currentExtent) map.getView().fit(currentExtent, {padding: [30,30,30,30]});
+}
+
+function addPlotHighlightLayer(plotId) {
+  if (!plotId) return;
+  clearPlotSearch();
+  plotSearchLayer = new ol.layer.Image({
+    source: new ol.source.ImageWMS({
+      url:'https://jharbhunaksha.jharkhand.gov.in/WMS',
+      params:{'LAYERS':'PLOT_LIST','STYLES':'PLOT_SELECTION','TRANSPARENT':true,'STATE':'20','gis_code':currentGisCode,'plot_id':plotId},
+      serverType:'geoserver'
+    }),
+    opacity:0.9
   });
   map.addLayer(plotSearchLayer);
-  if (currentExtent) map.getView().fit(currentExtent, {padding: [30,30,30,30]});
-  results.innerHTML = '<span style="color:#4a7a3a;">Applied. Matching plot(s) highlighted.</span>';
 }
 
 function clearPlotSearch() {
   if (plotSearchLayer) { map.removeLayer(plotSearchLayer); plotSearchLayer = null; }
+  if (plotHighlightLayer) { map.removeLayer(plotHighlightLayer); plotHighlightLayer = null; }
   document.getElementById('plotSearchInput').value = '';
   document.getElementById('plotSearchResults').innerHTML = '';
 }
